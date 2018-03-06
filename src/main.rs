@@ -1,19 +1,19 @@
+extern crate actix;
+extern crate actix_web;
 extern crate clap;
 extern crate futures;
-extern crate hyper;
 #[macro_use]
 extern crate serde_derive;
 extern crate serde_json;
 extern crate urlencoding;
+
+use actix_web::*;
 
 use clap::{App, Arg};
 
 use futures::future::Future;
 use futures::Stream;
 
-use hyper::header::ContentLength;
-use hyper::server::{Http, Request, Response, Service};
-use hyper::StatusCode;
 use std::process::Command;
 
 struct PlexDownloader<'a> {
@@ -38,46 +38,38 @@ impl<'a> SftpRequest<'a> {
     }
 }
 
-impl<'a> Service for PlexDownloader<'a> {
-    type Request = Request;
-    type Response = Response;
-    type Error = hyper::Error;
-    type Future = Box<Future<Item = Self::Response, Error = Self::Error>>;
+impl<'a> PlexDownloader<'a> {
+    fn index_mjsonrust(&self, req: HttpRequest) -> Box<Future<Item = HttpResponse, Error = Error>> {
+        req.concat2()
+            .from_err()
+            .and_then(|b| {
+                let sftp_req: SftpRequest = if let Ok(j) = serde_json::from_slice(b.as_ref()) {
+                    j
+                } else {
+                    let bad_request = Body::from_slice(b"{\"err\":\"failed to parse request\"}");
+                    return Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                        .content_type("application/json")
+                        .body(bad_request)
+                        .unwrap());
+                };
 
-    fn call(&self, req: Request) -> Self::Future {
-        Box::new(req.body().concat2().map(|b| {
-            let sftp_req: SftpRequest = if let Ok(j) = serde_json::from_slice(b.as_ref()) {
-                j
-            } else {
-                let bad_request: &[u8] = b"bad request";
-                return Response::new()
-                    .with_status(StatusCode::BadRequest)
-                    .with_header(ContentLength(bad_request.len() as u64))
-                    .with_body(bad_request);
-            };
+                // let path = format!("{}:\"{}\"", self.src_server, sftp_req.path(self.split));
+                // let (res, status_code) = match Command::new("sftp")
+                //     .args(&["-r", &path, &sftp_req.dst()])
+                //     .spawn()
+                // {
+                //     Ok(_) => (format!("downloading {}", sftp_req.link), StatusCode::OK),
+                //     Err(err) => (format!("error {}", err), StatusCode::INTERNAL_SERVER_ERROR),
+                // };
+                let (res, status_code) = ("asdf".to_owned(), StatusCode::OK);
 
-            // let path = format!(
-            //     "{}:\"{}\"",
-            //     // "icarus.whatbox.ca:files/thing",
-            //     // ".",
-            //     self.src_server,
-            //     sftp_req.path(self.split)
-            // );
-            let (res, status_code) = match Command::new("sftp")
-                .args(&["-r", "TODO", &sftp_req.dst()])
-                .spawn()
-            {
-                Ok(_) => (format!("downloading {}", sftp_req.link), StatusCode::Ok),
-                Err(err) => (format!("error {}", err), StatusCode::InternalServerError),
-            };
-
-            // let res = format!("downloading {}", sftp_req.link);
-            // let status_code = StatusCode::Ok;
-            Response::new()
-                .with_status(status_code)
-                .with_header(ContentLength(res.len() as u64))
-                .with_body(res)
-        }))
+                let body = Body::from_slice(&res.into_bytes());
+                Ok(HttpResponse::build(status_code)
+                    .content_type("application/json")
+                    .body(body)
+                    .unwrap())
+            })
+            .responder()
     }
 }
 
@@ -138,14 +130,26 @@ fn main() {
     let split = matches.value_of("split").unwrap();
     let port = matches.value_of("port").unwrap();
 
-    let addr = format!("127.0.0.1:{}", port).parse().unwrap();
-    let server = Http::new()
-        .bind(&addr, move || {
-            Ok(PlexDownloader {
+    let addr = format!("127.0.0.1:{}", port);
+
+    let sys = actix::System::new("json-example");
+
+    println!("Started http server: {}", addr);
+
+    HttpServer::new(|| {
+        Application::new().resource("/", |r| {
+            // TODO: Find how to make this live long enough that it doesn't have to be moved.
+            let downloader = PlexDownloader {
                 split: "roy_rogers/",
                 src_server: "user@minty",
-            })
+            };
+            r.method(Method::POST)
+                .f(move |c| downloader.index_mjsonrust(c))
         })
-        .unwrap();
-    server.run().unwrap();
+    }).bind(&addr)
+        .unwrap()
+        .shutdown_timeout(1)
+        .start();
+
+    let _ = sys.run();
 }
