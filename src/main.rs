@@ -1,75 +1,138 @@
-extern crate actix;
-extern crate actix_web;
 extern crate clap;
-extern crate futures;
 #[macro_use]
 extern crate serde_derive;
 extern crate serde_json;
 extern crate urlencoding;
 
-use actix_web::*;
-
 use clap::{App, Arg};
-
-use futures::future::Future;
-use futures::Stream;
-
 use std::process::Command;
 
-struct PlexDownloader<'a> {
-    split: &'a str,
-    src_server: &'a str,
+extern crate futures;
+extern crate hyper;
+
+extern crate env_logger;
+#[macro_use]
+extern crate log;
+
+use hyper::{Chunk, StatusCode};
+use hyper::Method::Post;
+use hyper::server::{Request, Response, Service};
+
+use futures::future::{Future, FutureResult};
+use futures::{Sink, Stream};
+use futures::sync::mpsc::{channel, Sender};
+
+use std::io;
+use std::io::BufRead;
+use std::thread;
+
+struct PlexDownloader {
+    worker: Sender<Vec<String>>,
+    split: String,
+    src_server: String,
+}
+
+impl Service for PlexDownloader {
+    type Request = Request;
+    type Response = Response;
+    type Error = hyper::Error;
+    type Future = Box<Future<Item = Self::Response, Error = Self::Error>>;
+
+    fn call(&self, request: Request) -> Self::Future {
+        match (request.method(), request.path()) {
+            (&Post, "/") => {
+                let split = self.split.clone();
+                let src_server = self.src_server.clone();
+                let future = request
+                    .body()
+                    .concat2()
+                    .and_then(parse_body)
+                    .and_then(|sftp_request| start_sftp(src_server, split, sftp_request))
+                    .then(make_post_response);
+                Box::new(future)
+            }
+            _ => Box::new(futures::future::ok(
+                Response::new().with_status(StatusCode::NotFound),
+            )),
+        }
+    }
+}
+
+fn parse_body(body: Chunk) -> FutureResult<SftpRequest, hyper::Error> {
+    match serde_json::from_slice(body.as_ref()) {
+        Ok(j) => {
+            info!("parsed request {:?}", j);
+            futures::future::ok(j)
+        }
+        Err(err) => {
+            info!("parsing failed err={}", err);
+            futures::future::err(hyper::Error::from(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "failed to parse body",
+            )))
+        }
+    }
+}
+
+fn start_sftp(
+    src_server: String,
+    split: String,
+    sftp_request: SftpRequest,
+) -> FutureResult<SftpRequest, hyper::Error> {
+    let path = format!("{}:\"{}\"", src_server, sftp_request.path(&split));
+    let result = Command::new("sftp")
+        .args(&["-r", &path, &sftp_request.dst()])
+        .output();
+    match result {
+        Ok(output) => {
+            info!("success: {:?}", output);
+            futures::future::ok(sftp_request)
+        }
+        Err(err) => {
+            info!("failure: {:?}", err);
+            futures::future::err(hyper::Error::from(err))
+        }
+    }
+    // self.worker.send(command);
+}
+
+fn make_post_response(
+    result: Result<SftpRequest, hyper::Error>,
+) -> FutureResult<hyper::Response, hyper::Error> {
+    futures::future::ok(Response::new().with_status(StatusCode::NotFound))
+}
+
+fn spawn_worker() -> Sender<Vec<String>> {
+    let (tx, rx) = channel(1);
+    thread::spawn(move || {
+        rx.for_each(|vec| {
+            info!("{:?}", vec);
+            // command.output();
+            Ok(())
+        }).map(|()| {
+                info!("The worker has stopped!");
+            })
+            .wait()
+            .unwrap();
+    });
+    tx
 }
 
 #[derive(Deserialize, Default, Debug)]
-struct SftpRequest<'a> {
-    link: &'a str,
-    destination: &'a str,
+struct SftpRequest {
+    link: String,
+    destination: String,
 }
 
-impl<'a> SftpRequest<'a> {
+impl SftpRequest {
     fn path(&self, split: &str) -> String {
         let p = urlencoding::decode(&self.link).unwrap();
         p.split(split).last().unwrap().to_owned()
     }
 
     fn dst(&self) -> String {
-        format!("/var/lib/plexmediaserver/{}", self.destination)
-    }
-}
-
-impl<'a> PlexDownloader<'a> {
-    fn index_mjsonrust(&self, req: HttpRequest) -> Box<Future<Item = HttpResponse, Error = Error>> {
-        req.concat2()
-            .from_err()
-            .and_then(|b| {
-                let sftp_req: SftpRequest = if let Ok(j) = serde_json::from_slice(b.as_ref()) {
-                    j
-                } else {
-                    let bad_request = Body::from_slice(b"{\"err\":\"failed to parse request\"}");
-                    return Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                        .content_type("application/json")
-                        .body(bad_request)
-                        .unwrap());
-                };
-
-                // let path = format!("{}:\"{}\"", self.src_server, sftp_req.path(self.split));
-                // let (res, status_code) = match Command::new("sftp")
-                //     .args(&["-r", &path, &sftp_req.dst()])
-                //     .spawn()
-                // {
-                //     Ok(_) => (format!("downloading {}", sftp_req.link), StatusCode::OK),
-                //     Err(err) => (format!("error {}", err), StatusCode::INTERNAL_SERVER_ERROR),
-                // };
-                let (res, status_code) = ("asdf".to_owned(), StatusCode::OK);
-
-                let body = Body::from_slice(&res.into_bytes());
-                Ok(HttpResponse::build(status_code)
-                    .content_type("application/json")
-                    .body(body)
-                    .unwrap())
-            })
-            .responder()
+        format!("/Users/stuartn/workspace/plex-rs/{}", self.destination)
+        // format!("/var/lib/plexmediaserver/{}", self.destination)
     }
 }
 
@@ -78,8 +141,8 @@ mod tests {
     #[test]
     fn test_clean_path() {
         use SftpRequest;
-        let link = "sftp://example.biz/mnt/mpathm/roy_rogers/files/Blade%20Runner%202049%201080p%20WEB-DL%20H264%20AC3-EVO";
-        let destination = "/usr/what";
+        let link = "sftp://example.biz/mnt/mpathm/roy_rogers/files/Blade%20Runner%202049%201080p%20WEB-DL%20H264%20AC3-EVO".to_owned();
+        let destination = "/usr/what".to_owned();
         let split = "roy_rogers/".to_owned();
         let sftp_req = SftpRequest {
             link: link,
@@ -126,30 +189,22 @@ fn main() {
         )
         .get_matches();
 
-    let src_server = matches.value_of("source_server").unwrap();
-    let split = matches.value_of("split").unwrap();
+    let src_server = matches.value_of("source_server").unwrap().to_owned();
+    let split = matches.value_of("split").unwrap().to_owned();
     let port = matches.value_of("port").unwrap();
 
-    let addr = format!("127.0.0.1:{}", port);
-
-    let sys = actix::System::new("json-example");
-
-    println!("Started http server: {}", addr);
-
-    HttpServer::new(|| {
-        Application::new().resource("/", |r| {
-            // TODO: Find how to make this live long enough that it doesn't have to be moved.
-            let downloader = PlexDownloader {
-                split: "roy_rogers/",
-                src_server: "user@minty",
-            };
-            r.method(Method::POST)
-                .f(move |c| downloader.index_mjsonrust(c))
+    env_logger::init();
+    let worker = spawn_worker();
+    let address = format!("127.0.0.1:{}", port).parse().unwrap();
+    let server = hyper::server::Http::new()
+        .bind(&address, move || {
+            Ok(PlexDownloader {
+                worker: worker.clone(),
+                split: split.clone(),
+                src_server: src_server.clone(),
+            })
         })
-    }).bind(&addr)
-        .unwrap()
-        .shutdown_timeout(1)
-        .start();
-
-    let _ = sys.run();
+        .unwrap();
+    info!("Running microservice at {}", address);
+    server.run().unwrap();
 }
