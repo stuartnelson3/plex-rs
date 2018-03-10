@@ -182,6 +182,6 @@ fn main() {
             })
         })
         .unwrap();
-    info!("Running microservice at {}", address);
+    info!("Running plex-downloader at {}", address);
     server.run().unwrap();
 }
