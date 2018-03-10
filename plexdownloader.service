@@ -1,0 +1,17 @@
+[Unit]
+Description=Server to xfer files to plex server
+After=network.target
+
+[Service]
+ExecStart=/var/lib/plexmediaserver/plex-downloader --src.server "server" --split "split"
+Environment="RUST_LOG=plex_downloader=debug"
+Type=simple
+User=plex
+Group=plex
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=60s
+StartLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target
