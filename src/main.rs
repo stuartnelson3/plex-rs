@@ -173,7 +173,7 @@ fn main() {
     let port = matches.value_of("port").unwrap();
 
     env_logger::init();
-    let address = format!("127.0.0.1:{}", port).parse().unwrap();
+    let address = format!("0.0.0.0:{}", port).parse().unwrap();
     let server = hyper::server::Http::new()
         .bind(&address, move || {
             Ok(PlexDownloader {
