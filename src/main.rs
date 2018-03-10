@@ -4,9 +4,6 @@ extern crate serde_derive;
 extern crate serde_json;
 extern crate urlencoding;
 
-use clap::{App, Arg};
-use std::process::Command;
-
 extern crate futures;
 extern crate hyper;
 
@@ -14,20 +11,19 @@ extern crate env_logger;
 #[macro_use]
 extern crate log;
 
+use clap::{App, Arg};
+use std::process::Command;
+
 use hyper::{Chunk, StatusCode};
 use hyper::Method::Post;
 use hyper::server::{Request, Response, Service};
 
+use futures::Stream;
 use futures::future::{Future, FutureResult};
-use futures::{Sink, Stream};
-use futures::sync::mpsc::{channel, Sender};
 
 use std::io;
-use std::io::BufRead;
-use std::thread;
 
 struct PlexDownloader {
-    worker: Sender<Vec<String>>,
     split: String,
     src_server: String,
 }
@@ -47,8 +43,7 @@ impl Service for PlexDownloader {
                     .body()
                     .concat2()
                     .and_then(parse_body)
-                    .and_then(|sftp_request| start_sftp(src_server, split, sftp_request))
-                    .then(make_post_response);
+                    .and_then(|sftp_request| start_sftp(src_server, split, sftp_request));
                 Box::new(future)
             }
             _ => Box::new(futures::future::ok(
@@ -78,44 +73,29 @@ fn start_sftp(
     src_server: String,
     split: String,
     sftp_request: SftpRequest,
-) -> FutureResult<SftpRequest, hyper::Error> {
+) -> FutureResult<hyper::Response, hyper::Error> {
     let path = format!("{}:\"{}\"", src_server, sftp_request.path(&split));
     let result = Command::new("sftp")
         .args(&["-r", &path, &sftp_request.dst()])
-        .output();
+        .spawn();
     match result {
-        Ok(output) => {
-            info!("success: {:?}", output);
-            futures::future::ok(sftp_request)
+        Ok(child) => {
+            info!("child_id: {}", child.id());
+            futures::future::ok(
+                Response::new()
+                    .with_status(StatusCode::Ok)
+                    .with_body("success"),
+            )
         }
         Err(err) => {
             info!("failure: {:?}", err);
-            futures::future::err(hyper::Error::from(err))
+            futures::future::ok(
+                Response::new()
+                    .with_status(StatusCode::InternalServerError)
+                    .with_body("error"),
+            )
         }
     }
-    // self.worker.send(command);
-}
-
-fn make_post_response(
-    result: Result<SftpRequest, hyper::Error>,
-) -> FutureResult<hyper::Response, hyper::Error> {
-    futures::future::ok(Response::new().with_status(StatusCode::NotFound))
-}
-
-fn spawn_worker() -> Sender<Vec<String>> {
-    let (tx, rx) = channel(1);
-    thread::spawn(move || {
-        rx.for_each(|vec| {
-            info!("{:?}", vec);
-            // command.output();
-            Ok(())
-        }).map(|()| {
-                info!("The worker has stopped!");
-            })
-            .wait()
-            .unwrap();
-    });
-    tx
 }
 
 #[derive(Deserialize, Default, Debug)]
@@ -131,8 +111,7 @@ impl SftpRequest {
     }
 
     fn dst(&self) -> String {
-        format!("/Users/stuartn/workspace/plex-rs/{}", self.destination)
-        // format!("/var/lib/plexmediaserver/{}", self.destination)
+        format!("/var/lib/plexmediaserver/{}", self.destination)
     }
 }
 
@@ -194,12 +173,10 @@ fn main() {
     let port = matches.value_of("port").unwrap();
 
     env_logger::init();
-    let worker = spawn_worker();
     let address = format!("127.0.0.1:{}", port).parse().unwrap();
     let server = hyper::server::Http::new()
         .bind(&address, move || {
             Ok(PlexDownloader {
-                worker: worker.clone(),
                 split: split.clone(),
                 src_server: src_server.clone(),
             })
