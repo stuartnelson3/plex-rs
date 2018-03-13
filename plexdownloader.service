@@ -3,7 +3,7 @@ Description=Server to xfer files to plex server
 After=network.target
 
 [Service]
-ExecStart=/var/lib/plexmediaserver/plex-downloader --src.server "server" --split "split"
+ExecStart=/var/lib/plexmediaserver/plex-downloader --src.server "derp.biz" --split "roy_rogers/" --port 4567
 Environment="RUST_LOG=plex_downloader=debug"
 Type=simple
 User=plex
