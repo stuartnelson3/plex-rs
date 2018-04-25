@@ -14,14 +14,15 @@ extern crate log;
 use clap::{App, Arg};
 use std::process::Command;
 
-use hyper::{Chunk, StatusCode};
 use hyper::Method::Post;
 use hyper::server::{Request, Response, Service};
+use hyper::{Chunk, StatusCode};
 
 use futures::Stream;
 use futures::future::{Future, FutureResult};
 
 use std::io;
+use std::thread;
 
 struct PlexDownloader {
     split: String,
@@ -74,28 +75,22 @@ fn start_sftp(
     split: String,
     sftp_request: SftpRequest,
 ) -> FutureResult<hyper::Response, hyper::Error> {
-    let path = format!("{}:\"{}\"", src_server, sftp_request.path(&split));
-    let result = Command::new("sftp")
-        .args(&["-r", &path, &sftp_request.dst()])
-        .spawn();
-    match result {
-        Ok(child) => {
-            info!("child_id: {}", child.id());
-            futures::future::ok(
-                Response::new()
-                    .with_status(StatusCode::Ok)
-                    .with_body("success"),
-            )
+    thread::spawn(move || {
+        let path = format!("{}:\"{}\"", src_server, sftp_request.path(&split));
+        let output = Command::new("sftp")
+            .args(&["-r", &path, &sftp_request.dst()])
+            .output();
+        match output {
+            Ok(output) => info!("success? {}", output.status.success()),
+            Err(err) => info!("error: {}", err),
         }
-        Err(err) => {
-            info!("failure: {:?}", err);
-            futures::future::ok(
-                Response::new()
-                    .with_status(StatusCode::InternalServerError)
-                    .with_body("error"),
-            )
-        }
-    }
+    });
+
+    futures::future::ok(
+        Response::new()
+            .with_status(StatusCode::Ok)
+            .with_body("downloading"),
+    )
 }
 
 #[derive(Deserialize, Default, Debug)]
