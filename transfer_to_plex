@@ -3,4 +3,4 @@
 dst=$1
 sftp_link=$2
 
-curl -XPOST -d '{"destination":"mnt/'$dst'", "link":"'$sftp_link'"}' dfly1:4567
+curl -i -XPOST -H "Content-Type: application/json" -d '{"destination":"mnt/'$dst'", "link":"'$sftp_link'"}' dfly1:4567

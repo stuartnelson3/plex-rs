@@ -4,8 +4,11 @@ extern crate serde_derive;
 extern crate serde_json;
 extern crate urlencoding;
 
+extern crate actix;
+extern crate actix_web;
 extern crate futures;
-extern crate hyper;
+
+use actix_web::{http, middleware, server, HttpRequest, Json};
 
 extern crate env_logger;
 #[macro_use]
@@ -14,14 +17,6 @@ extern crate log;
 use clap::{App, Arg};
 use std::process::Command;
 
-use hyper::Method::Post;
-use hyper::server::{Request, Response, Service};
-use hyper::{Chunk, StatusCode};
-
-use futures::Stream;
-use futures::future::{Future, FutureResult};
-
-use std::io;
 use std::thread;
 
 struct PlexDownloader {
@@ -29,74 +24,26 @@ struct PlexDownloader {
     src_server: String,
 }
 
-impl Service for PlexDownloader {
-    type Request = Request;
-    type Response = Response;
-    type Error = hyper::Error;
-    type Future = Box<Future<Item = Self::Response, Error = Self::Error>>;
-
-    fn call(&self, request: Request) -> Self::Future {
-        match (request.method(), request.path()) {
-            (&Post, "/") => {
-                let split = self.split.clone();
-                let src_server = self.src_server.clone();
-                let future = request
-                    .body()
-                    .concat2()
-                    .and_then(parse_body)
-                    .and_then(|sftp_request| start_sftp(src_server, split, sftp_request));
-                Box::new(future)
-            }
-            _ => Box::new(futures::future::ok(
-                Response::new().with_status(StatusCode::NotFound),
-            )),
-        }
-    }
-}
-
-fn parse_body(body: Chunk) -> FutureResult<SftpRequest, hyper::Error> {
-    match serde_json::from_slice(body.as_ref()) {
-        Ok(j) => {
-            info!("parsed request {:?}", j);
-            futures::future::ok(j)
-        }
-        Err(err) => {
-            info!("parsing failed err={}", err);
-            futures::future::err(hyper::Error::from(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "failed to parse body",
-            )))
-        }
-    }
-}
-
-fn start_sftp(
-    src_server: String,
-    split: String,
-    sftp_request: SftpRequest,
-) -> FutureResult<hyper::Response, hyper::Error> {
+fn start_sftp(req: HttpRequest<PlexDownloader>, sftp_req: Json<SftpRequest>) -> &'static str {
+    let src_server = req.state().src_server.clone();
+    let split = req.state().split.clone();
     thread::spawn(move || {
-        let path = format!("{}:\"{}\"", src_server, sftp_request.path(&split));
+        let path = format!("{}:\"{}\"", src_server, sftp_req.path(&split));
         let output = Command::new("sftp")
-            .args(&["-r", &path, &sftp_request.dst()])
+            .args(&["-r", &path, &sftp_req.dst()])
             .output();
         match output {
             Ok(output) => info!("success? {}", output.status.success()),
             Err(err) => info!("error: {}", err),
         }
     });
-
-    futures::future::ok(
-        Response::new()
-            .with_status(StatusCode::Ok)
-            .with_body("downloading"),
-    )
+    "spawned"
 }
 
 #[derive(Deserialize, Default, Debug)]
 struct SftpRequest {
-    link: String,
     destination: String,
+    link: String,
 }
 
 impl SftpRequest {
@@ -166,17 +113,23 @@ fn main() {
     let src_server = matches.value_of("source_server").unwrap().to_owned();
     let split = matches.value_of("split").unwrap().to_owned();
     let port = matches.value_of("port").unwrap();
+    let sys = actix::System::new("plex_downloader");
 
+    ::std::env::set_var("RUST_LOG", "plex_downloader=info");
     env_logger::init();
-    let address = format!("0.0.0.0:{}", port).parse().unwrap();
-    let server = hyper::server::Http::new()
-        .bind(&address, move || {
-            Ok(PlexDownloader {
-                split: split.clone(),
-                src_server: src_server.clone(),
-            })
-        })
-        .unwrap();
-    info!("Running plex-downloader at {}", address);
-    server.run().unwrap();
+    let address = format!("0.0.0.0:{}", port);
+
+    info!("Running plex_downloader at {}", address);
+
+    server::new(move || {
+        actix_web::App::with_state(PlexDownloader {
+            split: split.clone(),
+            src_server: src_server.clone(),
+        }).middleware(middleware::Logger::default())
+            .resource("/", |r| r.method(http::Method::POST).with2(start_sftp))
+    }).bind(address)
+        .unwrap()
+        .start();
+
+    let _ = sys.run();
 }
