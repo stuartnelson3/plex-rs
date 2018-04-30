@@ -1,4 +1,4 @@
-TARGET ?= x86_64-unknown-linux-musl
+TARGET ?= x86_64-unknown-linux-gnu
 BIN = target/$(TARGET)/release/plex-downloader
 CARGO ?= docker run -it --rm -v $(CURDIR):$(CURDIR) -w $(CURDIR) rust:latest cargo
 
