@@ -7,8 +7,11 @@ extern crate urlencoding;
 extern crate actix;
 extern crate actix_web;
 extern crate futures;
+#[macro_use]
+extern crate prometheus;
+use prometheus::Encoder;
 
-use actix_web::{http, middleware, server, HttpRequest, Json, Result};
+use actix_web::{http, middleware, server, HttpRequest, HttpResponse, Json, Result};
 
 extern crate env_logger;
 #[macro_use]
@@ -22,19 +25,34 @@ use std::thread;
 struct PlexDownloader {
     split: String,
     src_server: String,
+    active_downloads_gauge: prometheus::Gauge,
+}
+
+fn metrics(_req: HttpRequest<PlexDownloader>) -> HttpResponse {
+    let encoder = prometheus::TextEncoder::new();
+    let metrics = prometheus::gather();
+    let mut buffer = vec![];
+    encoder.encode(&metrics, &mut buffer).unwrap();
+    HttpResponse::Ok().content_type("plain/text").body(buffer)
 }
 
 fn start_sftp(req: HttpRequest<PlexDownloader>, sftp_req: Json<SftpRequest>) -> Result<String> {
     let src_server = req.state().src_server.clone();
     let split = req.state().split.clone();
+    let gauge = req.state().active_downloads_gauge.clone();
     let path = format!("{}:\"{}\"", src_server, sftp_req.path(&split));
     let child = Command::new("sftp")
         .args(&["-r", &path, &sftp_req.dst()])
         .spawn()?;
 
-    thread::spawn(move || match child.wait_with_output() {
-        Ok(output) => info!("success={}", output.status.success()),
-        Err(err) => info!("error={}", err),
+    gauge.inc();
+
+    thread::spawn(move || {
+        match child.wait_with_output() {
+            Ok(output) => info!("success={}", output.status.success()),
+            Err(err) => info!("error={}", err),
+        };
+        gauge.dec();
     });
 
     Ok("spawned".to_owned())
@@ -121,11 +139,18 @@ fn main() {
 
     info!("Running plex_downloader at {}", address);
 
+    let gauge = register_gauge!(
+        "plex_downloader_active_downloads",
+        "A gauge of current active sftp downloads."
+    ).unwrap();
+
     server::new(move || {
         actix_web::App::with_state(PlexDownloader {
             split: split.clone(),
             src_server: src_server.clone(),
+            active_downloads_gauge: gauge.clone(),
         }).middleware(middleware::Logger::default())
+            .resource("/metrics", |r| r.method(http::Method::GET).with(metrics))
             .resource("/", |r| r.method(http::Method::POST).with2(start_sftp))
     }).bind(address)
         .unwrap()
