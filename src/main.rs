@@ -8,7 +8,7 @@ extern crate actix;
 extern crate actix_web;
 extern crate futures;
 
-use actix_web::{http, middleware, server, HttpRequest, Json};
+use actix_web::{http, middleware, server, HttpRequest, Json, Result};
 
 extern crate env_logger;
 #[macro_use]
@@ -24,20 +24,20 @@ struct PlexDownloader {
     src_server: String,
 }
 
-fn start_sftp(req: HttpRequest<PlexDownloader>, sftp_req: Json<SftpRequest>) -> &'static str {
+fn start_sftp(req: HttpRequest<PlexDownloader>, sftp_req: Json<SftpRequest>) -> Result<String> {
     let src_server = req.state().src_server.clone();
     let split = req.state().split.clone();
-    thread::spawn(move || {
-        let path = format!("{}:\"{}\"", src_server, sftp_req.path(&split));
-        let output = Command::new("sftp")
-            .args(&["-r", &path, &sftp_req.dst()])
-            .output();
-        match output {
-            Ok(output) => info!("success? {}", output.status.success()),
-            Err(err) => info!("error: {}", err),
-        }
+    let path = format!("{}:\"{}\"", src_server, sftp_req.path(&split));
+    let child = Command::new("sftp")
+        .args(&["-r", &path, &sftp_req.dst()])
+        .spawn()?;
+
+    thread::spawn(move || match child.wait_with_output() {
+        Ok(output) => info!("success={}", output.status.success()),
+        Err(err) => info!("error={}", err),
     });
-    "spawned"
+
+    Ok("spawned".to_owned())
 }
 
 #[derive(Deserialize, Default, Debug)]
