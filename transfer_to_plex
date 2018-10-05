@@ -3,4 +3,11 @@
 dst=$1
 sftp_link=$2
 
-curl -XPOST -H "Content-Type: application/json" -d '{"destination":"mnt/'$dst'", "link":"'$sftp_link'"}' dfly1:4567
+shift
+for sftp_link in "$@"; do
+
+  echo "downloading ${sftp_link##*/}.. "
+  curl -XPOST -H "Content-Type: application/json" -d '{"destination":"mnt/'$dst'", "link":"'$sftp_link'"}' dfly1:4567
+  echo
+
+done
