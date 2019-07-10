@@ -4,23 +4,25 @@ extern crate serde_derive;
 extern crate serde_json;
 extern crate urlencoding;
 
-extern crate actix;
 extern crate actix_web;
-extern crate futures;
 #[macro_use]
 extern crate prometheus;
 use prometheus::Encoder;
 
-use actix_web::{http, middleware, server, HttpRequest, HttpResponse, Json, Result};
+use actix_web::web;
+use actix_web::web::{Data, Json};
+use actix_web::{middleware, App, HttpRequest, HttpResponse, HttpServer, Result};
 
 extern crate env_logger;
 #[macro_use]
 extern crate log;
 
-use clap::{App, Arg};
+use clap::Arg;
 use std::process::Command;
 
 use std::thread;
+
+use std::io;
 
 struct PlexDownloader {
     split: String,
@@ -28,7 +30,7 @@ struct PlexDownloader {
     active_downloads_gauge: prometheus::Gauge,
 }
 
-fn metrics(_req: HttpRequest<PlexDownloader>) -> HttpResponse {
+fn metrics(_req: HttpRequest) -> HttpResponse {
     let encoder = prometheus::TextEncoder::new();
     let metrics = prometheus::gather();
     let mut buffer = vec![];
@@ -36,10 +38,14 @@ fn metrics(_req: HttpRequest<PlexDownloader>) -> HttpResponse {
     HttpResponse::Ok().content_type("plain/text").body(buffer)
 }
 
-fn start_sftp(req: HttpRequest<PlexDownloader>, sftp_req: Json<SftpRequest>) -> Result<String> {
-    let src_server = req.state().src_server.clone();
-    let split = req.state().split.clone();
-    let gauge = req.state().active_downloads_gauge.clone();
+fn start_sftp(
+    sftp_req: Json<SftpRequest>,
+    state: Data<PlexDownloader>,
+    _req: HttpRequest,
+) -> Result<String> {
+    let src_server = state.src_server.clone();
+    let split = state.split.clone();
+    let gauge = state.active_downloads_gauge.clone();
     let path = format!("{}:\"{}\"", src_server, sftp_req.path(&split));
     let child = Command::new("sftp")
         .args(&["-r", &path, &sftp_req.dst()])
@@ -94,8 +100,8 @@ mod tests {
     }
 }
 
-fn main() {
-    let matches = App::new("Plex Downloader")
+fn main() -> io::Result<()> {
+    let matches = clap::App::new("Plex Downloader")
         .version("0.1.0")
         .author("stuart nelson <stuartnelson3@gmail.com>")
         .about("Queues up downloading files from remote server")
@@ -131,7 +137,6 @@ fn main() {
     let src_server = matches.value_of("source_server").unwrap().to_owned();
     let split = matches.value_of("split").unwrap().to_owned();
     let port = matches.value_of("port").unwrap();
-    let sys = actix::System::new("plex_downloader");
 
     ::std::env::set_var("RUST_LOG", "plex_downloader=info");
     env_logger::init();
@@ -142,19 +147,21 @@ fn main() {
     let gauge = register_gauge!(
         "plex_downloader_active_downloads",
         "A gauge of current active sftp downloads."
-    ).unwrap();
+    )
+    .unwrap();
 
-    server::new(move || {
-        actix_web::App::with_state(PlexDownloader {
+    HttpServer::new(move || {
+        let downloader = Data::new(PlexDownloader {
             split: split.clone(),
             src_server: src_server.clone(),
             active_downloads_gauge: gauge.clone(),
-        }).middleware(middleware::Logger::default())
-            .resource("/metrics", |r| r.method(http::Method::GET).with(metrics))
-            .resource("/", |r| r.method(http::Method::POST).with2(start_sftp))
-    }).bind(address)
-        .unwrap()
-        .start();
-
-    let _ = sys.run();
+        });
+        App::new()
+            .register_data(downloader)
+            .wrap(middleware::Logger::default())
+            .service(web::resource("/metrics").to(metrics))
+            .service(web::resource("/").route(web::post().to(start_sftp)))
+    })
+    .bind(address)?
+    .run()
 }
