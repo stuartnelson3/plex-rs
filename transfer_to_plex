@@ -7,7 +7,7 @@ shift
 for sftp_link in "$@"; do
 
   echo "downloading ${sftp_link##*/}.. "
-  curl -XPOST -H "Content-Type: application/json" -d '{"destination":"mnt/'$dst'", "link":"'$sftp_link'"}' http://minty:4567
+  curl -XPOST -H "Content-Type: application/json" -d '{"destination":"mnt/'$dst'", "link":"'$sftp_link'"}' http://helios:4567
   echo
 
 done
