@@ -1,2 +1,4 @@
 info on static cross-compiling from macOS to linux:
 https://chr4.org/blog/2017/03/15/cross-compile-and-link-a-static-binary-on-macos-for-linux-with-cargo-and-rust/
+
+remove the passphrase on the ssh key to the remote server
