@@ -1,11 +1,12 @@
-TARGET ?= x86_64-unknown-linux-gnu
 BIN = target/$(TARGET)/release/plex-downloader
-CARGO ?= docker run -it --rm -v $(CURDIR):$(CURDIR) -w $(CURDIR) rust:latest cargo
+# DOCKER ?= rust:latest
+DOCKER ?= dlecan/rust-crosscompiler-arm:stable
+CARGO ?= docker run -it --rm -v $(CURDIR):$(CURDIR) -w $(CURDIR) $(DOCKER) cargo
 
 default: $(BIN)
 
 $(BIN): src/*.rs Cargo.*
-	$(CARGO) build --release --target=$(TARGET)
+	$(CARGO) build --release
 
 scp: $(BIN)
 	ssh plex@minty 'sudo systemctl stop plexdownloader'
