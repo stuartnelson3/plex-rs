@@ -2,9 +2,14 @@
 
 dst=$1
 sftp_link=$2
+if [ -f "${sftp_link}" ]; then
+  links="$(cat sftp_link)"
+else
+  links="${sftp_link}"
+fi
 
 shift
-for sftp_link in "$@"; do
+for sftp_link in ${links}; do
 
   echo "downloading ${sftp_link##*/}.. "
   curl -XPOST -H "Content-Type: application/json" -d '{"destination":"mnt/'$dst'", "link":"'$sftp_link'"}' http://helios:4567
