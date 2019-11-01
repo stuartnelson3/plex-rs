@@ -3,7 +3,7 @@
 dst=$1
 sftp_link=$2
 if [ -f "${sftp_link}" ]; then
-  links="$(cat sftp_link)"
+  links="$(cat $sftp_link)"
 else
   links="${sftp_link}"
 fi
