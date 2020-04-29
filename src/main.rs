@@ -158,7 +158,7 @@ async fn main() -> io::Result<()> {
             active_downloads_gauge: gauge.clone(),
         });
         App::new()
-            .data(downloader)
+            .app_data(downloader)
             .wrap(middleware::Logger::default())
             .service(web::resource("/metrics").to(metrics))
             .service(web::resource("/").route(web::post().to(start_sftp)))
