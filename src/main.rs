@@ -38,7 +38,7 @@ fn metrics(_req: HttpRequest) -> HttpResponse {
     HttpResponse::Ok().content_type("plain/text").body(buffer)
 }
 
-fn start_sftp(
+async fn start_sftp(
     sftp_req: Json<SftpRequest>,
     state: Data<PlexDownloader>,
     _req: HttpRequest,
@@ -85,7 +85,7 @@ impl SftpRequest {
 mod tests {
     #[test]
     fn test_clean_path() {
-        use SftpRequest;
+        use super::SftpRequest;
         let link = "sftp://example.biz/mnt/mpathm/roy_rogers/files/Blade%20Runner%202049%201080p%20WEB-DL%20H264%20AC3-EVO".to_owned();
         let destination = "/usr/what".to_owned();
         let split = "roy_rogers/".to_owned();
@@ -100,7 +100,8 @@ mod tests {
     }
 }
 
-fn main() -> io::Result<()> {
+#[actix_rt::main]
+async fn main() -> io::Result<()> {
     let matches = clap::App::new("Plex Downloader")
         .version("0.1.0")
         .author("stuart nelson <stuartnelson3@gmail.com>")
@@ -157,11 +158,12 @@ fn main() -> io::Result<()> {
             active_downloads_gauge: gauge.clone(),
         });
         App::new()
-            .register_data(downloader)
+            .data(downloader)
             .wrap(middleware::Logger::default())
             .service(web::resource("/metrics").to(metrics))
             .service(web::resource("/").route(web::post().to(start_sftp)))
     })
     .bind(address)?
     .run()
+    .await
 }

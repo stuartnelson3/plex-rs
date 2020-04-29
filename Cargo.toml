@@ -1,6 +1,7 @@
 [package]
 name = "plex-downloader"
 version = "0.1.0"
+edition = "2018"
 authors = ["stuart nelson <stuartnelson3@gmail.com>"]
 
 [dependencies]
@@ -8,7 +9,8 @@ env_logger = "^0.7"
 log = "^0.4"
 urlencoding = "^1.0"
 clap = "^2.33"
-actix-web = "^1.0"
+actix-web = "^2.0"
+actix-rt = "^1.0"
 prometheus = "^0.7"
 
 serde = "^1.0"
