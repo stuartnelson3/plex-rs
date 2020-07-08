@@ -17,15 +17,16 @@ extern crate env_logger;
 #[macro_use]
 extern crate log;
 
+extern crate ssh2;
+
 use clap::Arg;
-use std::process::Command;
 
 use std::thread;
 
 use std::io;
 
 struct PlexDownloader {
-    split: String,
+    username: String,
     src_server: String,
     active_downloads_gauge: prometheus::Gauge,
 }
@@ -43,21 +44,66 @@ async fn start_sftp(
     state: Data<PlexDownloader>,
     _req: HttpRequest,
 ) -> Result<String> {
-    let src_server = state.src_server.clone();
-    let split = state.split.clone();
     let gauge = state.active_downloads_gauge.clone();
-    let path = format!("{}:\"{}\"", src_server, sftp_req.path(&split));
-    let child = Command::new("sftp")
-        .args(&["-r", &path, &sftp_req.dst()])
-        .spawn()?;
-
     gauge.inc();
 
     thread::spawn(move || {
-        match child.wait_with_output() {
-            Ok(output) => info!("success={}", output.status.success()),
-            Err(err) => info!("error={}", err),
-        };
+        use ssh2::Session;
+        use std::fs::File;
+        use std::io::prelude::*;
+        use std::io::{BufReader, BufWriter};
+        use std::net::TcpStream;
+        use std::path::Path;
+
+        // Connect to the local SSH server
+        let tcp = TcpStream::connect(format!("{}:22", state.src_server)).unwrap();
+        let mut sess = Session::new().unwrap();
+        sess.set_tcp_stream(tcp);
+        sess.handshake().unwrap();
+
+        // Try to authenticate with the first identity in the agent.
+        sess.userauth_agent(&state.username).unwrap();
+
+        let sftp = sess.sftp().unwrap();
+        let path = sftp_req.path();
+        let path = Path::new(&path);
+        let stat = sftp.stat(path).unwrap();
+        if stat.is_dir() {
+            // recursively dl files
+        } else {
+            // it's a file, just download it
+            let mut src = BufReader::new(sftp.open(&path).unwrap());
+
+            // Destination file
+            let dst = File::create(format!(
+                "{}/{}",
+                sftp_req.dst(),
+                path.file_name().unwrap().to_str().unwrap()
+            ))
+            .expect("Unable to create file");
+
+            // Allocate and reuse a 512kb buffer
+            // It seems most read calls are 30-180kb
+            let mut buffer = [0; 512 * 1024];
+            let mut dst = BufWriter::new(dst);
+
+            // Loop over read() calls and write successively to dst
+            while let Ok(n) = src.read(&mut buffer[..]) {
+                if n == 0 {
+                    // EOF
+                    break;
+                }
+
+                match dst.write(&buffer[..n]) {
+                    Ok(_) => (),
+                    Err(err) => println!("write error {}", err),
+                };
+            }
+
+            println!("written");
+            dst.flush().unwrap();
+        }
+
         gauge.dec();
     });
 
@@ -67,13 +113,12 @@ async fn start_sftp(
 #[derive(Deserialize, Default, Debug)]
 struct SftpRequest {
     destination: String,
-    link: String,
+    path: String,
 }
 
 impl SftpRequest {
-    fn path(&self, split: &str) -> String {
-        let p = urlencoding::decode(&self.link).unwrap();
-        p.split(split).last().unwrap().to_owned()
+    fn path(&self) -> String {
+        urlencoding::decode(&self.path).unwrap()
     }
 
     fn dst(&self) -> String {
@@ -86,17 +131,16 @@ mod tests {
     #[test]
     fn test_clean_path() {
         use super::SftpRequest;
-        let link = "sftp://example.biz/mnt/mpathm/roy_rogers/files/Blade%20Runner%202049%201080p%20WEB-DL%20H264%20AC3-EVO".to_owned();
+        let path = "files/Blade%20Runner%202049%201080p%20WEB-DL%20H264%20AC3-EVO".to_owned();
         let destination = "/usr/what".to_owned();
-        let split = "roy_rogers/".to_owned();
         let sftp_req = SftpRequest {
-            link: link,
+            path: path,
             destination: destination,
         };
 
         let expected = "files/Blade Runner 2049 1080p WEB-DL H264 AC3-EVO".to_owned();
 
-        assert_eq!(expected, sftp_req.path(&split));
+        assert_eq!(expected, sftp_req.path());
     }
 }
 
@@ -107,20 +151,20 @@ async fn main() -> io::Result<()> {
         .author("stuart nelson <stuartnelson3@gmail.com>")
         .about("Queues up downloading files from remote server")
         .arg(
-            Arg::with_name("source_server")
+            Arg::with_name("server")
                 .short("s")
-                .long("src.server")
-                .value_name("[user@]host")
+                .long("server")
+                .value_name("host")
                 .help("Connection info for server")
                 .required(true)
                 .takes_value(true),
         )
         .arg(
-            Arg::with_name("split")
-                .help("split incoming link on this value")
-                .short("c")
-                .long("split")
-                .value_name("SPLIT")
+            Arg::with_name("user")
+                .help("username for ssh connection")
+                .short("u")
+                .long("username")
+                .value_name("username")
                 .required(true)
                 .takes_value(true),
         )
@@ -135,8 +179,8 @@ async fn main() -> io::Result<()> {
         )
         .get_matches();
 
-    let src_server = matches.value_of("source_server").unwrap().to_owned();
-    let split = matches.value_of("split").unwrap().to_owned();
+    let src_server = matches.value_of("server").unwrap().to_owned();
+    let username = matches.value_of("user").unwrap().to_owned();
     let port = matches.value_of("port").unwrap();
 
     ::std::env::set_var("RUST_LOG", "plex_downloader=info");
@@ -153,7 +197,7 @@ async fn main() -> io::Result<()> {
 
     HttpServer::new(move || {
         let downloader = Data::new(PlexDownloader {
-            split: split.clone(),
+            username: username.clone(),
             src_server: src_server.clone(),
             active_downloads_gauge: gauge.clone(),
         });
