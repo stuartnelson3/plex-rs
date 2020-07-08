@@ -160,7 +160,7 @@ async fn main() -> io::Result<()> {
         App::new()
             .app_data(downloader)
             .wrap(middleware::Logger::default())
-            .service(web::resource("/metrics").to(metrics))
+            .service(web::resource("/metrics").route(web::get().to(metrics)))
             .service(web::resource("/").route(web::post().to(start_sftp)))
     })
     .bind(address)?
