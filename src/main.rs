@@ -27,7 +27,8 @@ use std::io;
 
 struct PlexDownloader {
     username: String,
-    src_server: String,
+    server: String,
+    split: String,
     active_downloads_gauge: prometheus::Gauge,
 }
 
@@ -56,7 +57,7 @@ async fn start_sftp(
         use std::path::Path;
 
         // Connect to the local SSH server
-        let tcp = TcpStream::connect(format!("{}:22", state.src_server)).unwrap();
+        let tcp = TcpStream::connect(format!("{}:22", state.server)).unwrap();
         let mut sess = Session::new().unwrap();
         sess.set_tcp_stream(tcp);
         sess.handshake().unwrap();
@@ -65,7 +66,7 @@ async fn start_sftp(
         sess.userauth_agent(&state.username).unwrap();
 
         let sftp = sess.sftp().unwrap();
-        let path = sftp_req.path();
+        let path = sftp_req.path(&state.split);
         let path = Path::new(&path);
         let stat = sftp.stat(path).unwrap();
         if stat.is_dir() {
@@ -113,12 +114,13 @@ async fn start_sftp(
 #[derive(Deserialize, Default, Debug)]
 struct SftpRequest {
     destination: String,
-    path: String,
+    link: String,
 }
 
 impl SftpRequest {
-    fn path(&self) -> String {
-        urlencoding::decode(&self.path).unwrap()
+    fn path(&self, split: &str) -> String {
+        let p = urlencoding::decode(&self.link).unwrap();
+        p.split(split).last().unwrap().to_owned()
     }
 
     fn dst(&self) -> String {
@@ -131,8 +133,9 @@ mod tests {
     #[test]
     fn test_clean_path() {
         use super::SftpRequest;
-        let path = "files/Blade%20Runner%202049%201080p%20WEB-DL%20H264%20AC3-EVO".to_owned();
+        let path = "sftp://example.biz/mnt/mpathm/roy_rogers/files/Blade%20Runner%202049%201080p%20WEB-DL%20H264%20AC3-EVO".to_owned();
         let destination = "/usr/what".to_owned();
+        let split = "roy_rogers/".to_owned();
         let sftp_req = SftpRequest {
             path: path,
             destination: destination,
@@ -140,7 +143,7 @@ mod tests {
 
         let expected = "files/Blade Runner 2049 1080p WEB-DL H264 AC3-EVO".to_owned();
 
-        assert_eq!(expected, sftp_req.path());
+        assert_eq!(expected, sftp_req.path(&split));
     }
 }
 
@@ -154,17 +157,17 @@ async fn main() -> io::Result<()> {
             Arg::with_name("server")
                 .short("s")
                 .long("server")
-                .value_name("host")
+                .value_name("[user@]host")
                 .help("Connection info for server")
                 .required(true)
                 .takes_value(true),
         )
         .arg(
-            Arg::with_name("user")
-                .help("username for ssh connection")
-                .short("u")
-                .long("username")
-                .value_name("username")
+            Arg::with_name("split")
+                .help("split incoming link on this value")
+                .short("c")
+                .long("split")
+                .value_name("SPLIT")
                 .required(true)
                 .takes_value(true),
         )
@@ -179,9 +182,24 @@ async fn main() -> io::Result<()> {
         )
         .get_matches();
 
-    let src_server = matches.value_of("server").unwrap().to_owned();
-    let username = matches.value_of("user").unwrap().to_owned();
+    let (username, server) = {
+        let input: Vec<&str> = matches.value_of("server").unwrap().split("@").collect();
+        if input.len() == 2 {
+            (input[0].to_owned(), input[1].to_owned())
+        } else {
+            // TODO: Grab the first user from ssh-agent
+            // https://docs.rs/ssh2/0.8.2/ssh2/struct.Agent.html
+            let username = env!("USER");
+            if username == "" {
+                panic!("no username! pass USER or set it on the front of the server.")
+            }
+            (username.to_owned(), input[1].to_owned())
+        }
+    };
+    let split = matches.value_of("split").unwrap().to_owned();
     let port = matches.value_of("port").unwrap();
+
+    println!("username={} server={} split={}", username, server, split);
 
     ::std::env::set_var("RUST_LOG", "plex_downloader=info");
     env_logger::init();
@@ -198,7 +216,8 @@ async fn main() -> io::Result<()> {
     HttpServer::new(move || {
         let downloader = Data::new(PlexDownloader {
             username: username.clone(),
-            src_server: src_server.clone(),
+            split: split.clone(),
+            server: server.clone(),
             active_downloads_gauge: gauge.clone(),
         });
         App::new()
