@@ -2,3 +2,10 @@ info on static cross-compiling from macOS to linux:
 https://chr4.org/blog/2017/03/15/cross-compile-and-link-a-static-binary-on-macos-for-linux-with-cargo-and-rust/
 
 remove the passphrase on the ssh key to the remote server
+
+--server: connection to the sftp server including username. if no username is
+          found, the server will parse $USER from the env.
+--split: how to split the sftp url to find the actual file path on the server
+
+example invocation:
+plex-downloader --server "user@derp.biz" --split "roy_rogers/" --port 4567
