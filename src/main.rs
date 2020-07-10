@@ -81,8 +81,6 @@ async fn start_sftp(
     Ok("spawned".to_owned())
 }
 
-// Change src_path to (PathBuf, FileStat) like the readdir method, then this can be recursively
-// called in the stat.is_dir() path.
 fn download(
     sftp: &ssh2::Sftp,
     (src_path, stat): (&Path, FileStat),
