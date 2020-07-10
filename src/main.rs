@@ -25,6 +25,13 @@ use std::thread;
 
 use std::io;
 
+use ssh2::{FileStat, Session};
+use std::fs::File;
+use std::io::prelude::*;
+use std::io::{BufReader, BufWriter};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+
 struct PlexDownloader {
     username: String,
     server: String,
@@ -49,13 +56,6 @@ async fn start_sftp(
     gauge.inc();
 
     thread::spawn(move || {
-        use ssh2::Session;
-        use std::fs::File;
-        use std::io::prelude::*;
-        use std::io::{BufReader, BufWriter};
-        use std::net::TcpStream;
-        use std::path::Path;
-
         // Connect to the local SSH server
         let tcp = TcpStream::connect(format!("{}:22", state.server)).unwrap();
         let mut sess = Session::new().unwrap();
@@ -68,47 +68,66 @@ async fn start_sftp(
         let sftp = sess.sftp().unwrap();
         let path = sftp_req.path(&state.split);
         let path = Path::new(&path);
+        // TODO: Handle the file not existing gracefully.
+        // https://docs.rs/libc/0.2.72/libc/fn.sendfile.html
+        // https://stackoverflow.com/questions/20235843/how-to-receive-a-file-using-sendfile
         let stat = sftp.stat(path).unwrap();
-        if stat.is_dir() {
-            // recursively dl files
-        } else {
-            // it's a file, just download it
-            let mut src = BufReader::new(sftp.open(&path).unwrap());
-
-            // Destination file
-            let dst = File::create(format!(
-                "{}/{}",
-                sftp_req.dst(),
-                path.file_name().unwrap().to_str().unwrap()
-            ))
-            .expect("Unable to create file");
-
-            // Allocate and reuse a 512kb buffer
-            // It seems most read calls are 30-180kb
-            let mut buffer = [0; 512 * 1024];
-            let mut dst = BufWriter::new(dst);
-
-            // Loop over read() calls and write successively to dst
-            while let Ok(n) = src.read(&mut buffer[..]) {
-                if n == 0 {
-                    // EOF
-                    break;
-                }
-
-                match dst.write(&buffer[..n]) {
-                    Ok(_) => (),
-                    Err(err) => println!("write error {}", err),
-                };
-            }
-
-            println!("written");
-            dst.flush().unwrap();
-        }
+        let dst_path = format!(
+            "{}/{}",
+            sftp_req.dst(),
+            path.file_name().unwrap().to_str().unwrap()
+        );
+        let dst_path = Path::new(&dst_path);
+        download(&sftp, (path.to_path_buf(), stat), dst_path);
 
         gauge.dec();
     });
 
     Ok("spawned".to_owned())
+}
+
+// Change src_path to (PathBuf, FileStat) like the readdir method, then this can be recursively
+// called in the stat.is_dir() path.
+fn download(sftp: &ssh2::Sftp, src: (PathBuf, FileStat), dst_path: &Path) -> Result<String> {
+    let (path, stat) = src;
+    if stat.is_dir() {
+        // recursively dl files
+        // need to also check if contained files are dirs, and recursively read them.
+        // make a dir_paths fn that returns a vec of paths, and if it's a dir, calls itself,
+        // etc etc
+        // let paths = sftp.readdir(&path).unwrap();
+        // paths.
+    } else {
+        // it's a file, just download it
+        let mut src = BufReader::new(sftp.open(&path).unwrap());
+
+        // Destination file
+        // TODO: send in dst_path?
+        // take dst_path.parent(), and if it is Some(dir), try to mkdir -p it.
+        let dst = File::create(dst_path).expect("Unable to create file");
+
+        // Allocate and reuse a 512kb buffer
+        // It seems most read calls are 30-180kb
+        let mut buffer = [0; 512 * 1024];
+        let mut dst = BufWriter::new(dst);
+
+        // TODO: can we use sendfile?
+        // Loop over read() calls and write successively to dst
+        while let Ok(n) = src.read(&mut buffer[..]) {
+            if n == 0 {
+                // EOF
+                break;
+            }
+
+            match dst.write(&buffer[..n]) {
+                Ok(_) => (),
+                Err(err) => println!("write error {}", err),
+            };
+        }
+        dst.flush().unwrap();
+    }
+
+    Ok("TODO: Useful return value".to_owned())
 }
 
 #[derive(Deserialize, Default, Debug)]
@@ -133,11 +152,11 @@ mod tests {
     #[test]
     fn test_clean_path() {
         use super::SftpRequest;
-        let path = "sftp://example.biz/mnt/mpathm/roy_rogers/files/Blade%20Runner%202049%201080p%20WEB-DL%20H264%20AC3-EVO".to_owned();
+        let link = "sftp://example.biz/mnt/mpathm/roy_rogers/files/Blade%20Runner%202049%201080p%20WEB-DL%20H264%20AC3-EVO".to_owned();
         let destination = "/usr/what".to_owned();
         let split = "roy_rogers/".to_owned();
         let sftp_req = SftpRequest {
-            path: path,
+            link: link,
             destination: destination,
         };
 
