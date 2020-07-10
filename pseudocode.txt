@@ -1,0 +1,51 @@
+main() {
+  max_threads = 8
+  jobs_queue = Array<string>::new()
+  active_threads = Array<threads>::new()
+  threadpool = threadpool::new(max_threads, jobs_queue, active_threads)
+
+  handler = web_handler(threadpool).handle(incoming_request)
+
+  handler.listen("localhost:3000")
+}
+
+// executes in its own thread
+incoming_request(threadpool: threadpool, req: Request) {
+  path = req.sftp_path
+  threadpool.schedule(path)
+  return "ok"
+}
+
+struct threadpool {
+  max_threads: int
+  active_threads: int
+  jobs_queue: Array<string>
+
+  // do we need this?
+  // available_threads: Array<thread>
+}
+
+(threadpool) schedule(path: string) {
+  jq = jobs_queue.lock()
+  jq.push(path)
+  jq.unlock()
+
+  at = active_threads.lock().get()
+  if at < max_threads {
+    at++
+    at.unlock()
+
+    thread::new {
+      while Some(job) = jobs_queue.pop() {
+        download(job)
+      }
+
+      at = active_threads.lock().get()
+      at--
+      at.unlock()
+    }
+  } else {
+    at.unlock()
+  }
+}
+

@@ -1,0 +1,126 @@
+expanding/contracting bounded threadpool
+============================================
+
+wants:
+
+- incoming sftp requests get scheduled to a thread
+- if no threads are running, we spawn one
+- we limit the number of active download threads
+- if a request comes in and we are above the limit, we store the request to
+  be completed when a thread is free
+- when a thread finishes a download, it checks to see if there are
+  available requests
+- if there are no available requests, the thread finishes
+
+discussion:
+
+threads vs. processes: why are we using threads?
+======================================================
+
+process 1: scala web app
+- thread 1: web request -> reads request -> writing data to disk
+- thread 2: web request -> reads request -> database call
+- thread 3: web request -> reads request -> database call
+- thread 4: web request -> reads request -> database call
+
+"fork" a process -> create a new duplicate
+                    copy memory, copy context, etc etc
+                    "CoW" -> Copy on Write
+
+"fork bomb"
+process 1 - thread 1
+process "2" (1) - thread 2
+
+"i/o" -> file i/o, network i/o, doesn't matter
+input/output
+
+network i/o -> writing to or reading from a network socket
+socket.read()
+socket.write()
+
+userspace
+socket, file -> these are all represented as "files"
+hey, read from this connection!!!
+==========
+hey, I'm going to read this connection!!!
+kernel
+file -> write to disk
+network -> read from network device
+
+"unit of work" -> something (a program) that gets scheduled by the kernel
+to use CPU/Memory/Network/etc
+
+container -> isolated process
+
+cat, ls,
+
+
+how many threads should we choose?
+======================================
+
+a thread can only execute when scheduled to a CPU
+"blocking" and "non-blocking"
+
+so, a computer can run at most #CPU threads at a time
+
+
+
+USERSPACE
+spotify, your terminal, a scala webapp
+
+thread:
+
+  bytes = network_conn.read() // "non-blocking"
+        -> open conn
+        -> read bytes
+        -> send bytes back to user
+  os.file.write(bytes)
+
+different program types: "cpu bound" vs. "i/o bound"
+
+MEASURE!
+software engineering == software measuring
+
+KERNELSPACE
+coordinating interactions with hardeware (cd drive, network card, hard
+drive)
+schedules userspace programs to CPUs
+
+
+mutex vs. semaphore
+===================
+
+mutex IS specific kind of a semaphore
+
+sem = semaphore{ access: 3, mem: 0x123abc }
+mutex = semaphore{ access: 1, mem: 0x123abc }
+
+some_array.unlock() -> semaphore
+
+array_mutex = Mutex(Array(int))
+
+array_mutex.unlock?.pop(4)
+
+type person struct {
+  books Array(book)
+  mutex
+}
+
+p = person.new
+
+p.lock
+p.books.push(book.new)
+p.unlock
+
+thread1.request_access(sem).ok? => OK!
+thread2.request_access(sem).ok? => OK!
+thread3.request_access(sem).ok? => OK!
+thread4.request_access(sem).ok? => NOT OK!!!
+
+latency vs. throughput
+=========================
+
+latency: how long does it take for a SINGLE request to finish?
+
+throughput: how many requests can we finish per second?
+
