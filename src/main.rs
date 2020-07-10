@@ -17,16 +17,25 @@ extern crate env_logger;
 #[macro_use]
 extern crate log;
 
+extern crate ssh2;
+
 use clap::Arg;
-use std::process::Command;
 
 use std::thread;
 
 use std::io;
 
+use ssh2::{FileStat, Session};
+use std::fs::{create_dir_all, File};
+use std::io::prelude::*;
+use std::io::{BufReader, BufWriter};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+
 struct PlexDownloader {
+    username: String,
+    server: String,
     split: String,
-    src_server: String,
     active_downloads_gauge: prometheus::Gauge,
 }
 
@@ -43,25 +52,81 @@ async fn start_sftp(
     state: Data<PlexDownloader>,
     _req: HttpRequest,
 ) -> Result<String> {
-    let src_server = state.src_server.clone();
-    let split = state.split.clone();
     let gauge = state.active_downloads_gauge.clone();
-    let path = format!("{}:\"{}\"", src_server, sftp_req.path(&split));
-    let child = Command::new("sftp")
-        .args(&["-r", &path, &sftp_req.dst()])
-        .spawn()?;
-
     gauge.inc();
 
     thread::spawn(move || {
-        match child.wait_with_output() {
-            Ok(output) => info!("success={}", output.status.success()),
-            Err(err) => info!("error={}", err),
-        };
+        // Connect to the local SSH server
+        let tcp = TcpStream::connect(format!("{}:22", state.server)).unwrap();
+        let mut sess = Session::new().unwrap();
+        sess.set_tcp_stream(tcp);
+        sess.handshake().unwrap();
+
+        // Try to authenticate with the first identity in the agent.
+        sess.userauth_agent(&state.username).unwrap();
+
+        let sftp = sess.sftp().unwrap();
+        let path = sftp_req.path(&state.split);
+        let path = PathBuf::from(&path);
+        // TODO: Handle the file not existing gracefully.
+        // https://docs.rs/libc/0.2.72/libc/fn.sendfile.html
+        // https://stackoverflow.com/questions/20235843/how-to-receive-a-file-using-sendfile
+        let stat = sftp.stat(&path).unwrap();
+        let dst = sftp_req.dst();
+        download(&sftp, (&path, stat), Path::new(&dst));
+
         gauge.dec();
     });
 
     Ok("spawned".to_owned())
+}
+
+// Change src_path to (PathBuf, FileStat) like the readdir method, then this can be recursively
+// called in the stat.is_dir() path.
+fn download(
+    sftp: &ssh2::Sftp,
+    (src_path, stat): (&Path, FileStat),
+    dst_path: &Path,
+) -> Result<String> {
+    // destination write path on local disk
+    let dst_path = dst_path.join(src_path.file_name().unwrap());
+
+    if stat.is_dir() {
+        // make sure the local dir we want to write into exists
+        create_dir_all(&dst_path).unwrap();
+        for (path, stat) in sftp.readdir(&src_path).unwrap().into_iter() {
+            download(sftp, (&path, stat), &dst_path);
+        }
+    } else {
+        // it's a file, just download it
+        let mut src = BufReader::new(sftp.open(&src_path).unwrap());
+
+        // Destination file
+        // let dst_path = dst_path.to_str().unwrap();
+        let dst = File::create(dst_path).expect("Unable to create file");
+
+        // Allocate and reuse a 512kb buffer
+        // It seems most read calls are 30-180kb
+        let mut buffer = [0; 512 * 1024];
+        let mut dst = BufWriter::new(dst);
+
+        // TODO: can we use sendfile?
+        // Loop over read() calls and write successively to dst
+        while let Ok(n) = src.read(&mut buffer[..]) {
+            if n == 0 {
+                // EOF
+                break;
+            }
+
+            match dst.write(&buffer[..n]) {
+                Ok(_) => (),
+                Err(err) => println!("write error {}", err),
+            };
+        }
+        dst.flush().unwrap();
+    }
+
+    Ok("TODO: Useful return value".to_owned())
 }
 
 #[derive(Deserialize, Default, Debug)]
@@ -107,9 +172,9 @@ async fn main() -> io::Result<()> {
         .author("stuart nelson <stuartnelson3@gmail.com>")
         .about("Queues up downloading files from remote server")
         .arg(
-            Arg::with_name("source_server")
+            Arg::with_name("server")
                 .short("s")
-                .long("src.server")
+                .long("server")
                 .value_name("[user@]host")
                 .help("Connection info for server")
                 .required(true)
@@ -135,9 +200,24 @@ async fn main() -> io::Result<()> {
         )
         .get_matches();
 
-    let src_server = matches.value_of("source_server").unwrap().to_owned();
+    let (username, server) = {
+        let input: Vec<&str> = matches.value_of("server").unwrap().split("@").collect();
+        if input.len() == 2 {
+            (input[0].to_owned(), input[1].to_owned())
+        } else {
+            // TODO: Grab the first user from ssh-agent
+            // https://docs.rs/ssh2/0.8.2/ssh2/struct.Agent.html
+            let username = env!("USER");
+            if username == "" {
+                panic!("no username! pass USER or set it on the front of the server.")
+            }
+            (username.to_owned(), input[1].to_owned())
+        }
+    };
     let split = matches.value_of("split").unwrap().to_owned();
     let port = matches.value_of("port").unwrap();
+
+    println!("username={} server={} split={}", username, server, split);
 
     ::std::env::set_var("RUST_LOG", "plex_downloader=info");
     env_logger::init();
@@ -153,8 +233,9 @@ async fn main() -> io::Result<()> {
 
     HttpServer::new(move || {
         let downloader = Data::new(PlexDownloader {
+            username: username.clone(),
             split: split.clone(),
-            src_server: src_server.clone(),
+            server: server.clone(),
             active_downloads_gauge: gauge.clone(),
         });
         App::new()
