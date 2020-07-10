@@ -26,7 +26,7 @@ use std::thread;
 use std::io;
 
 use ssh2::{FileStat, Session};
-use std::fs::File;
+use std::fs::{create_dir_all, File};
 use std::io::prelude::*;
 use std::io::{BufReader, BufWriter};
 use std::net::TcpStream;
@@ -67,18 +67,13 @@ async fn start_sftp(
 
         let sftp = sess.sftp().unwrap();
         let path = sftp_req.path(&state.split);
-        let path = Path::new(&path);
+        let path = PathBuf::from(&path);
         // TODO: Handle the file not existing gracefully.
         // https://docs.rs/libc/0.2.72/libc/fn.sendfile.html
         // https://stackoverflow.com/questions/20235843/how-to-receive-a-file-using-sendfile
-        let stat = sftp.stat(path).unwrap();
-        let dst_path = format!(
-            "{}/{}",
-            sftp_req.dst(),
-            path.file_name().unwrap().to_str().unwrap()
-        );
-        let dst_path = Path::new(&dst_path);
-        download(&sftp, (path.to_path_buf(), stat), dst_path);
+        let stat = sftp.stat(&path).unwrap();
+        let dst = sftp_req.dst();
+        download(&sftp, (&path, stat), Path::new(&dst));
 
         gauge.dec();
     });
@@ -88,22 +83,26 @@ async fn start_sftp(
 
 // Change src_path to (PathBuf, FileStat) like the readdir method, then this can be recursively
 // called in the stat.is_dir() path.
-fn download(sftp: &ssh2::Sftp, src: (PathBuf, FileStat), dst_path: &Path) -> Result<String> {
-    let (path, stat) = src;
+fn download(
+    sftp: &ssh2::Sftp,
+    (src_path, stat): (&Path, FileStat),
+    dst_path: &Path,
+) -> Result<String> {
+    // destination write path on local disk
+    let dst_path = dst_path.join(src_path.file_name().unwrap());
+
     if stat.is_dir() {
-        // recursively dl files
-        // need to also check if contained files are dirs, and recursively read them.
-        // make a dir_paths fn that returns a vec of paths, and if it's a dir, calls itself,
-        // etc etc
-        // let paths = sftp.readdir(&path).unwrap();
-        // paths.
+        // make sure the local dir we want to write into exists
+        create_dir_all(&dst_path).unwrap();
+        for (path, stat) in sftp.readdir(&src_path).unwrap().into_iter() {
+            download(sftp, (&path, stat), &dst_path);
+        }
     } else {
         // it's a file, just download it
-        let mut src = BufReader::new(sftp.open(&path).unwrap());
+        let mut src = BufReader::new(sftp.open(&src_path).unwrap());
 
         // Destination file
-        // TODO: send in dst_path?
-        // take dst_path.parent(), and if it is Some(dir), try to mkdir -p it.
+        // let dst_path = dst_path.to_str().unwrap();
         let dst = File::create(dst_path).expect("Unable to create file");
 
         // Allocate and reuse a 512kb buffer
