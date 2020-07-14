@@ -124,3 +124,9 @@ latency: how long does it take for a SINGLE request to finish?
 
 throughput: how many requests can we finish per second?
 
+testing
+============================================
+
+- what are we testing?
+- how are we testing it?
+
