@@ -221,7 +221,7 @@ async fn main() -> io::Result<()> {
         } else {
             // TODO: Grab the first user from ssh-agent
             // https://docs.rs/ssh2/0.8.2/ssh2/struct.Agent.html
-            let username = env!("USER");
+            let username = std::env::var("USER").unwrap();
             if username == "" {
                 panic!("no username! pass USER or set it on the front of the server.")
             }
