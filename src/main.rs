@@ -267,7 +267,7 @@ async fn main() -> io::Result<()> {
             server: server.clone(),
             active_downloads_gauge: gauge.clone(),
             jobs_queue: SegQueue::new(),
-            max_threads: 8,
+            max_threads: num_cpus::get(),
             active_threads: AtomicUsize::new(0),
         });
         App::new()
@@ -276,6 +276,7 @@ async fn main() -> io::Result<()> {
             .service(web::resource("/metrics").route(web::get().to(metrics)))
             .service(web::resource("/").route(web::post().to(start_sftp)))
     })
+    .workers(1)
     .bind(address)?
     .run()
     .await
