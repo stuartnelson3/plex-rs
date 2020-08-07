@@ -16,6 +16,7 @@ use actix_web::{middleware, App, HttpRequest, HttpResponse, HttpServer, Result};
 extern crate env_logger;
 #[macro_use]
 extern crate log;
+use log::{debug, info};
 
 extern crate ssh2;
 
@@ -34,6 +35,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 extern crate crossbeam;
+extern crate num_cpus;
 use crossbeam::queue::SegQueue;
 
 struct PlexDownloader {
@@ -71,7 +73,7 @@ async fn start_sftp(
             .store(active_threads + 1, Ordering::Relaxed);
 
         thread::spawn(move || {
-            println!("spawned thread {}", active_threads + 1);
+            debug!("spawned thread {}", active_threads + 1);
             gauge.inc();
             // Connect to the local SSH server
 
@@ -94,11 +96,11 @@ async fn start_sftp(
                 let stat = sftp.stat(&path).unwrap();
                 let dst = req.dst();
                 match download(&sftp, (&path, stat), Path::new(&dst)) {
-                    Err(err) => println!("download error {}", err),
-                    Ok(_) => println!("downloaded {}", path.to_str().unwrap()),
+                    Err(err) => error!("download error {}", err),
+                    Ok(_) => info!("downloaded {}", path.to_str().unwrap()),
                 }
             }
-            println!("exiting thread {}", active_threads + 1);
+            debug!("exiting thread {}", active_threads + 1);
             let active_threads = state.active_threads.load(Ordering::Relaxed);
             // No more jobs in the queue.
             // Decrement current active threads count and let the thread exit.
@@ -127,7 +129,7 @@ fn download(
         create_dir_all(&dst_path).unwrap();
         for (path, stat) in sftp.readdir(&src_path)?.into_iter() {
             total += download(sftp, (&path, stat), &dst_path)?;
-            println!("downloaded {}", path.to_str().unwrap());
+            info!("downloaded {}", path.to_str().unwrap());
         }
     } else {
         // it's a file, just download it
@@ -245,13 +247,12 @@ async fn main() -> io::Result<()> {
     let split = matches.value_of("split").unwrap().to_owned();
     let port = matches.value_of("port").unwrap();
 
-    println!("username={} server={} split={}", username, server, split);
-
-    ::std::env::set_var("RUST_LOG", "plex_downloader=info");
     env_logger::init();
+    info!("username={} server={} split={}", username, server, split);
+
     let address = format!("0.0.0.0:{}", port);
 
-    info!("Running plex_downloader at {}", address);
+    info!("running plex_downloader at {}", address);
 
     let gauge = register_gauge!(
         "plex_downloader_active_downloads",
