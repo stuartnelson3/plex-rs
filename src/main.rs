@@ -31,12 +31,19 @@ use std::io::prelude::*;
 use std::io::{BufReader, BufWriter};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+extern crate crossbeam;
+use crossbeam::queue::SegQueue;
 
 struct PlexDownloader {
     username: String,
     server: String,
     split: String,
     active_downloads_gauge: prometheus::Gauge,
+    jobs_queue: SegQueue<SftpRequest>,
+    max_threads: usize,
+    active_threads: AtomicUsize,
 }
 
 fn metrics(_req: HttpRequest) -> HttpResponse {
@@ -53,30 +60,53 @@ async fn start_sftp(
     _req: HttpRequest,
 ) -> Result<String> {
     let gauge = state.active_downloads_gauge.clone();
-    gauge.inc();
+    state.jobs_queue.push(sftp_req.into_inner());
 
-    thread::spawn(move || {
-        // Connect to the local SSH server
-        let tcp = TcpStream::connect(format!("{}:22", state.server)).unwrap();
-        let mut sess = Session::new().unwrap();
-        sess.set_tcp_stream(tcp);
-        sess.handshake().unwrap();
+    let active_threads = state.active_threads.load(Ordering::Relaxed);
 
-        // Try to authenticate with the first identity in the agent.
-        sess.userauth_agent(&state.username).unwrap();
+    if active_threads < state.max_threads {
+        // Increment current active threads count so we don't spawn too many threads.
+        state
+            .active_threads
+            .store(active_threads + 1, Ordering::Relaxed);
 
-        let sftp = sess.sftp().unwrap();
-        let path = sftp_req.path(&state.split);
-        let path = PathBuf::from(&path);
-        // TODO: Handle the file not existing gracefully.
-        // https://docs.rs/libc/0.2.72/libc/fn.sendfile.html
-        // https://stackoverflow.com/questions/20235843/how-to-receive-a-file-using-sendfile
-        let stat = sftp.stat(&path).unwrap();
-        let dst = sftp_req.dst();
-        download(&sftp, (&path, stat), Path::new(&dst));
+        thread::spawn(move || {
+            gauge.inc();
+            // Connect to the local SSH server
 
-        gauge.dec();
-    });
+            let tcp = TcpStream::connect(format!("{}:22", state.server)).unwrap();
+            let mut sess = Session::new().unwrap();
+            sess.set_tcp_stream(tcp);
+            sess.handshake().unwrap();
+
+            // Try to authenticate with the first identity in the agent.
+            sess.userauth_agent(&state.username).unwrap();
+
+            let sftp = sess.sftp().unwrap();
+
+            while let Ok(req) = state.jobs_queue.pop() {
+                let path = req.path(&state.split);
+                let path = PathBuf::from(&path);
+                // TODO: Handle the file not existing gracefully.
+                // https://docs.rs/libc/0.2.72/libc/fn.sendfile.html
+                // https://stackoverflow.com/questions/20235843/how-to-receive-a-file-using-sendfile
+                let stat = sftp.stat(&path).unwrap();
+                let dst = req.dst();
+                match download(&sftp, (&path, stat), Path::new(&dst)) {
+                    Err(err) => println!("download error {}", err),
+                    Ok(_) => println!("downloaded {}", path.to_str().unwrap()),
+                }
+            }
+            let active_threads = state.active_threads.load(Ordering::Relaxed);
+            // No more jobs in the queue.
+            // Decrement current active threads count and let the thread exit.
+            state
+                .active_threads
+                .store(active_threads - 1, Ordering::Relaxed);
+
+            gauge.dec();
+        });
+    }
 
     Ok("spawned".to_owned())
 }
@@ -85,23 +115,24 @@ fn download(
     sftp: &ssh2::Sftp,
     (src_path, stat): (&Path, FileStat),
     dst_path: &Path,
-) -> Result<String> {
+) -> Result<usize, Box<dyn std::error::Error>> {
     // destination write path on local disk
     let dst_path = dst_path.join(src_path.file_name().unwrap());
+    let mut total = 0;
 
     if stat.is_dir() {
         // make sure the local dir we want to write into exists
         create_dir_all(&dst_path).unwrap();
-        for (path, stat) in sftp.readdir(&src_path).unwrap().into_iter() {
-            download(sftp, (&path, stat), &dst_path);
+        for (path, stat) in sftp.readdir(&src_path)?.into_iter() {
+            total += download(sftp, (&path, stat), &dst_path)?;
+            println!("downloaded {}", path.to_str().unwrap());
         }
     } else {
         // it's a file, just download it
-        let mut src = BufReader::new(sftp.open(&src_path).unwrap());
+        let mut src = BufReader::new(sftp.open(&src_path)?);
 
         // Destination file
-        // let dst_path = dst_path.to_str().unwrap();
-        let dst = File::create(dst_path).expect("Unable to create file");
+        let dst = File::create(dst_path)?;
 
         // Allocate and reuse a 512kb buffer
         // It seems most read calls are 30-180kb
@@ -116,15 +147,12 @@ fn download(
                 break;
             }
 
-            match dst.write(&buffer[..n]) {
-                Ok(_) => (),
-                Err(err) => println!("write error {}", err),
-            };
+            total += dst.write(&buffer[..n])?;
         }
-        dst.flush().unwrap();
+        dst.flush()?;
     }
 
-    Ok("TODO: Useful return value".to_owned())
+    Ok(total)
 }
 
 #[derive(Deserialize, Default, Debug)]
@@ -235,6 +263,9 @@ async fn main() -> io::Result<()> {
             split: split.clone(),
             server: server.clone(),
             active_downloads_gauge: gauge.clone(),
+            jobs_queue: SegQueue::new(),
+            max_threads: 8,
+            active_threads: AtomicUsize::new(0),
         });
         App::new()
             .app_data(downloader)
