@@ -71,6 +71,7 @@ async fn start_sftp(
             .store(active_threads + 1, Ordering::Relaxed);
 
         thread::spawn(move || {
+            println!("spawned thread {}", active_threads + 1);
             gauge.inc();
             // Connect to the local SSH server
 
@@ -97,6 +98,7 @@ async fn start_sftp(
                     Ok(_) => println!("downloaded {}", path.to_str().unwrap()),
                 }
             }
+            println!("exiting thread {}", active_threads + 1);
             let active_threads = state.active_threads.load(Ordering::Relaxed);
             // No more jobs in the queue.
             // Decrement current active threads count and let the thread exit.
