@@ -5,13 +5,10 @@ extern crate serde_json;
 extern crate urlencoding;
 
 extern crate actix_web;
-#[macro_use]
-extern crate prometheus;
-use prometheus::Encoder;
 
 use actix_web::web;
 use actix_web::web::{Data, Json};
-use actix_web::{middleware, App, HttpRequest, HttpResponse, HttpServer, Result};
+use actix_web::{middleware, App, HttpRequest, HttpServer, Result};
 
 extern crate env_logger;
 #[macro_use]
@@ -42,18 +39,9 @@ struct PlexDownloader {
     username: String,
     server: String,
     split: String,
-    active_downloads_gauge: prometheus::Gauge,
     jobs_queue: SegQueue<SftpRequest>,
     max_threads: usize,
     active_threads: AtomicUsize,
-}
-
-fn metrics(_req: HttpRequest) -> HttpResponse {
-    let encoder = prometheus::TextEncoder::new();
-    let metrics = prometheus::gather();
-    let mut buffer = vec![];
-    encoder.encode(&metrics, &mut buffer).unwrap();
-    HttpResponse::Ok().content_type("plain/text").body(buffer)
 }
 
 async fn start_sftp(
@@ -61,7 +49,6 @@ async fn start_sftp(
     state: Data<PlexDownloader>,
     _req: HttpRequest,
 ) -> Result<String> {
-    let gauge = state.active_downloads_gauge.clone();
     state.jobs_queue.push(sftp_req.into_inner());
 
     let active_threads = state.active_threads.load(Ordering::Relaxed);
@@ -74,7 +61,6 @@ async fn start_sftp(
 
         thread::spawn(move || {
             debug!("spawned thread {}", active_threads + 1);
-            gauge.inc();
             // Connect to the local SSH server
 
             let tcp = TcpStream::connect(format!("{}:22", state.server)).unwrap();
@@ -107,8 +93,6 @@ async fn start_sftp(
             state
                 .active_threads
                 .store(active_threads - 1, Ordering::Relaxed);
-
-            gauge.dec();
         });
     }
 
@@ -254,18 +238,11 @@ async fn main() -> io::Result<()> {
 
     info!("running plex_downloader at {}", address);
 
-    let gauge = register_gauge!(
-        "plex_downloader_active_downloads",
-        "A gauge of current active sftp downloads."
-    )
-    .unwrap();
-
     HttpServer::new(move || {
         let downloader = Data::new(PlexDownloader {
             username: username.clone(),
             split: split.clone(),
             server: server.clone(),
-            active_downloads_gauge: gauge.clone(),
             jobs_queue: SegQueue::new(),
             max_threads: num_cpus::get(),
             active_threads: AtomicUsize::new(0),
@@ -273,7 +250,6 @@ async fn main() -> io::Result<()> {
         App::new()
             .app_data(downloader)
             .wrap(middleware::Logger::default())
-            .service(web::resource("/metrics").route(web::get().to(metrics)))
             .service(web::resource("/").route(web::post().to(start_sftp)))
     })
     .workers(1)
