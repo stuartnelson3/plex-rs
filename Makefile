@@ -1,7 +1,12 @@
 BIN = target/$(TARGET)/release/plex-downloader
 # DOCKER ?= rust:latest
 DOCKER ?= dlecan/rust-crosscompiler-arm:stable
-CARGO ?= docker run -it --rm -v $(CURDIR):$(CURDIR) -w $(CURDIR) $(DOCKER) cargo
+CARGO ?= docker run -it --rm \
+	-v $(CURDIR):$(CURDIR) \
+	-v ~/.cargo/git:/root/.cargo/git \
+	-v ~/.cargo/registry:/root/.cargo/registry \
+	-w $(CURDIR) $(DOCKER) cargo
+
 USER ?= plex
 SERVER ?= helios
 
