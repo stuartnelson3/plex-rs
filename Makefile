@@ -1,10 +1,9 @@
 BIN = target/$(TARGET)/release/plex-downloader
-# DOCKER ?= rust:latest
-DOCKER ?= dlecan/rust-crosscompiler-arm:stable
+DOCKER ?= stuartnelson3/rust-cross-compiler-arm
 CARGO ?= docker run -it --rm \
 	-v $(CURDIR):$(CURDIR) \
-	-v ~/.cargo/git:/root/.cargo/git \
-	-v ~/.cargo/registry:/root/.cargo/registry \
+	-v ~/.cargo/git:/cargo/git \
+	-v ~/.cargo/registry:/cargo/registry \
 	-w $(CURDIR) $(DOCKER) cargo
 
 USER ?= plex
