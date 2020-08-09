@@ -135,6 +135,7 @@ fn download(
                 break;
             }
 
+            debug!("buffered bytes read {}", n);
             total += dst.write(&buffer[..n])?;
         }
         dst.flush()?;
