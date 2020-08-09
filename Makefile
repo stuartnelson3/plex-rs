@@ -1,13 +1,10 @@
-BIN = target/$(TARGET)/release/plex-downloader
-DOCKER ?= stuartnelson3/rust-cross-compiler-arm
+BIN = target/armv7-unknown-linux-musleabihf/release/plex-downloader
+DOCKER ?= messense/rust-musl-cross:armv7-musleabihf
 CARGO ?= docker run -it --rm \
 	-v $(CURDIR):$(CURDIR) \
-	-v ~/.cargo/git:/cargo/git \
-	-v ~/.cargo/registry:/cargo/registry \
+	-v ~/.cargo/git:/root/.cargo/git \
+	-v ~/.cargo/registry:/root/.cargo/registry \
 	-w $(CURDIR) $(DOCKER) cargo
-
-USER ?= plex
-SERVER ?= helios
 
 default: $(BIN)
 
@@ -15,9 +12,7 @@ $(BIN): src/*.rs Cargo.*
 	$(CARGO) build --release
 
 scp: $(BIN)
-	ssh $(USER)@$(SERVER) 'sudo systemctl stop plexdownloader'
-	scp $< $(USER)@$(SERVER):/var/lib/plexmediaserver
-	ssh $(USER)@$(SERVER) 'sudo systemctl start plexdownloader'
+	scp $< plex@helios:/var/lib/plexmediaserver
 
 test:
 	cargo test
